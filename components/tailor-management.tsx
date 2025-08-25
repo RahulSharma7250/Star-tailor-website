@@ -58,7 +58,10 @@ interface Job {
 }
 
 interface Bill {
-  id: string
+  id?: string
+  _id?: string
+  bill_no?: number
+  bill_no_str?: string
   customer_id: string
   customer_name: string
   customer_phone: string
@@ -330,6 +333,13 @@ export function TailorManagement() {
     return billId.length > 6 ? billId.slice(-6) : billId
   }
 
+  const formatBillNumber = (bill: Bill) => {
+    if (bill.bill_no_str) return bill.bill_no_str
+    if (typeof bill.bill_no === "number") return String(bill.bill_no).padStart(3, "0")
+    const id = bill.id || bill._id || ""
+    return getBillIdSuffix(id)
+  }
+
   const filteredTailors = tailors.filter(
     (tailor) =>
       tailor.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -345,7 +355,7 @@ export function TailorManagement() {
   )
 
   const handleBillSelection = async (billId: string) => {
-    const selectedBill = bills.find((bill) => bill.id === billId)
+    const selectedBill = bills.find((bill) => (bill.id || bill._id) === billId)
     if (selectedBill) {
       // Get the first item from the bill for auto-population
       const firstItem = selectedBill.items[0]
@@ -512,12 +522,14 @@ export function TailorManagement() {
                       <SelectContent>
                         {bills
                           .filter((bill) => bill.status === "pending" || bill.status === "paid")
-                          .map((bill) => (
-                            <SelectItem key={bill.id} value={bill.id}>
-                              {bill.customer_name} - Bill #{getBillIdSuffix(bill.id)} - ₹{bill.total} (
-                              {bill.items.length} items)
-                            </SelectItem>
-                          ))}
+                          .map((bill) => {
+                            const value = bill.id || bill._id || ""
+                            return (
+                              <SelectItem key={value} value={value}>
+                                {bill.customer_name} - Bill #{formatBillNumber(bill)} - ₹{bill.total} ({bill.items.length} items)
+                              </SelectItem>
+                            )
+                          })}
                       </SelectContent>
                     </Select>
                     {isBillsLoading && <p className="text-sm text-gray-500 mt-1">Loading bills...</p>}
@@ -532,7 +544,7 @@ export function TailorManagement() {
                       <CardContent className="p-4">
                         <h4 className="font-medium text-violet-800 mb-2">📋 Bill Details Preview</h4>
                         {(() => {
-                          const selectedBill = bills.find((bill) => bill.id === newJob.bill_id)
+                          const selectedBill = bills.find((bill) => (bill.id || bill._id) === newJob.bill_id)
                           return selectedBill ? (
                             <div className="text-sm space-y-2">
                               <div className="flex justify-between items-center">

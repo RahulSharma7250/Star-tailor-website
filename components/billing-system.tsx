@@ -35,6 +35,7 @@ interface BillItem {
 
 interface Bill {
   _id?: string
+  billNoStr?: string
   customerId: string
   customerName: string
   customerPhone: string
@@ -280,8 +281,12 @@ export function BillingSystem() {
 
       const billResponse = await api.bills.create(billData)
 
+      const created = billResponse.bill || billResponse
+      const billNoStr = created?.bill_no_str || created?.billNoStr || (created?.bill_no != null ? String(created.bill_no).padStart(3, "0") : undefined)
+
       const bill: Bill = {
-        _id: billResponse._id || billResponse.bill?._id,
+        _id: created?._id || billResponse._id,
+        billNoStr: billNoStr,
         customerId: customerId,
         customerName: newCustomer.name,
         customerPhone: newCustomer.phone,
@@ -1035,7 +1040,7 @@ export function BillingSystem() {
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
                     <div>
-                      <strong>Bill No:</strong> {currentBill._id}
+                      <strong>Bill No:</strong> {currentBill.billNoStr || currentBill._id}
                     </div>
                     <div>
                       <strong>Date:</strong> {new Date(currentBill.createdDate).toLocaleDateString()}

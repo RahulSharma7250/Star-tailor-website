@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from bson import ObjectId
 from datetime import datetime, timedelta
 import jwt
@@ -44,6 +44,7 @@ bills_collection = db.bills
 tailors_collection = db.tailors
 settings_collection = db.settings
 jobs_collection = db.jobs
+counters_collection = db.counters
 
 # JWT token decorator
 def token_required(f):
@@ -74,6 +75,31 @@ def token_required(f):
     return decorated
 
 # Initialize default admin user
+
+# Utility: Atomic sequence generator for bill numbers
+# Uses a counters collection to maintain sequential numbers
+# Stores both integer (bill_no) and zero-padded string (bill_no_str)
+
+def get_next_sequence(name: str) -> int:
+    try:
+        doc = counters_collection.find_one_and_update(
+            {'_id': name},
+            {'$inc': {'seq': 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        return int(doc.get('seq', 1))
+    except Exception:
+        # Fallback in case counters collection isn't available for some reason
+        # This will compute next number based on existing bills count
+        # Note: This is not perfectly safe for concurrent requests, but avoids crashes
+        return bills_collection.count_documents({}) + 1
+
+def format_bill_no(n: int, width: int = 3) -> str:
+    try:
+        return str(int(n)).zfill(width)
+    except Exception:
+        return str(n)
 def init_default_user():
     admin_exists = users_collection.find_one({'username': 'admin'})
     if not admin_exists:
@@ -520,6 +546,9 @@ def create_bill(current_user):
         if not isinstance(data['items'], list) or len(data['items']) == 0:
             return jsonify({'message': 'Items must be a non-empty array'}), 400
 
+        # Generate sequential bill number
+        next_no = get_next_sequence('bill_no')
+
         new_bill = {
             'customer_id': customer_id,
             'customer_name': data.get('customer_name', customer['name']),
@@ -539,7 +568,10 @@ def create_bill(current_user):
             'status': data.get('status', 'pending'),
             'created_by': str(current_user['_id']),
             'created_at': datetime.now(),
-            'updated_at': datetime.now()
+            'updated_at': datetime.now(),
+            # New fields for sequential bill number
+            'bill_no': int(next_no),
+            'bill_no_str': format_bill_no(next_no, 3),
         }
 
         result = bills_collection.insert_one(new_bill)
