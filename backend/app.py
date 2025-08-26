@@ -17,7 +17,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'rahul@123')
 
 # Read frontend URL for CORS from env (default to localhost)
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://star-tailor-website-production.up.railway.app/')
 
 # Comprehensive CORS setup
 CORS(app, origins=[FRONTEND_URL], 
@@ -1358,5 +1358,5 @@ def export_report(current_user):
 
 if __name__ == '__main__':
     init_default_user()
-    port = int(os.getenv('PORT', '5000'))
+    port = int(os.getenv('PORT', ''))
     app.run(debug=True, host='0.0.0.0', port=port)
