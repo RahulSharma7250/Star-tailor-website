@@ -1,5 +1,5 @@
 // API utility functions for backend communication
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "https://star-tailor-website-production.up.railway.app/api"
 
 // Helper function to get auth token
 const getAuthToken = () => {
