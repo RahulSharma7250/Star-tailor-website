@@ -101,19 +101,26 @@ def format_bill_no(n: int, width: int = 3) -> str:
     except Exception:
         return str(n)
 def init_default_user():
-    admin_exists = users_collection.find_one({'username': 'admin'})
-    if not admin_exists:
-        hashed_password = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt())
-        admin_user = {
-            'username': 'admin',
-            'password': hashed_password,
-            'role': 'admin',
-            'created_at': datetime.now()
-        }
-        users_collection.insert_one(admin_user)
-        print("Default admin user created: username=admin, password=admin123")
-    else:
-        print("Admin user already exists")
+    # Ensure default users exist: admin, tailor, billing
+    defaults = [
+        ('admin', 'admin123', 'admin'),
+        ('tailor', 'tailor123', 'tailor'),
+        ('billing', 'billing123', 'billing'),
+    ]
+    for username, pwd, role in defaults:
+        exists = users_collection.find_one({'username': username})
+        if not exists:
+            hashed_password = bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt())
+            user_doc = {
+                'username': username,
+                'password': hashed_password,
+                'role': role,
+                'created_at': datetime.now()
+            }
+            users_collection.insert_one(user_doc)
+            print(f"Default user created: username={username}, password={pwd}, role={role}")
+        else:
+            print(f"User already exists: {username}")
 
 # Authentication Routes
 @app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
@@ -652,6 +659,56 @@ def update_upi_settings(current_user):
     except Exception as e:
         return jsonify({'message': 'Failed to update UPI settings', 'error': str(e)}), 500
 
+# Business information settings
+@app.route('/api/settings/business', methods=['GET', 'OPTIONS'])
+@token_required
+def get_business_settings(current_user):
+    if request.method == 'OPTIONS':
+        return jsonify(), 200
+    try:
+        settings = settings_collection.find_one({'type': 'business_info'})
+        if not settings:
+            # Defaults
+            return jsonify({
+                'business_name': 'STAR TAILORS',
+                'address': 'Baramati, Maharashtra',
+                'phone': '+91 00000 00000',
+                'email': 'info@startailors.com'
+            }), 200
+        return jsonify({
+            'business_name': settings.get('business_name', 'STAR TAILORS'),
+            'address': settings.get('address', ''),
+            'phone': settings.get('phone', ''),
+            'email': settings.get('email', '')
+        }), 200
+    except Exception as e:
+        return jsonify({'message': 'Failed to get business settings', 'error': str(e)}), 500
+
+@app.route('/api/settings/business', methods=['PUT', 'OPTIONS'])
+@token_required
+def update_business_settings(current_user):
+    if request.method == 'OPTIONS':
+        return jsonify(), 200
+    try:
+        if current_user['role'] != 'admin':
+            return jsonify({'message': 'Access denied'}), 403
+        data = request.get_json()
+        update_doc = {
+            'business_name': data.get('business_name', 'STAR TAILORS'),
+            'address': data.get('address', ''),
+            'phone': data.get('phone', ''),
+            'email': data.get('email', ''),
+            'updated_at': datetime.now()
+        }
+        settings_collection.update_one(
+            {'type': 'business_info'},
+            {'$set': update_doc},
+            upsert=True
+        )
+        return jsonify({'message': 'Business settings updated successfully'}), 200
+    except Exception as e:
+        return jsonify({'message': 'Failed to update business settings', 'error': str(e)}), 500
+
 # Tailor Management Routes
 @app.route('/api/tailors', methods=['GET', 'OPTIONS'])
 @token_required
@@ -939,7 +996,7 @@ def update_job_status(current_user, job_id):
         if not status:
             return jsonify({'message': 'Status is required'}), 400
         
-        valid_statuses = ['assigned', 'in_progress', 'completed', 'cancelled']
+        valid_statuses = ['assigned', 'in_progress', 'completed', 'delivered', 'cancelled']
         if status not in valid_statuses:
             return jsonify({'message': 'Invalid status'}), 400
         

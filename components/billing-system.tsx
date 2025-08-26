@@ -110,6 +110,8 @@ export function BillingSystem() {
   const [drawingColor, setDrawingColor] = useState("#000000")
   const [drawingWidth, setDrawingWidth] = useState(2)
   const [upiId, setUpiId] = useState("startailors@paytm")
+  const [businessName, setBusinessName] = useState("STAR TAILORS")
+  const [businessAddress, setBusinessAddress] = useState("Baramati, Maharashtra")
   const [loading, setLoading] = useState(false)
   const [customersLoading, setCustomersLoading] = useState(true)
   const router = useRouter()
@@ -120,6 +122,7 @@ export function BillingSystem() {
   useEffect(() => {
     loadCustomers()
     loadUpiSettings()
+    loadBusinessInfo()
   }, [])
 
   const loadCustomers = async () => {
@@ -142,14 +145,25 @@ export function BillingSystem() {
   const loadUpiSettings = async () => {
     try {
       const settings = await api.settings.getUpi()
-      if (settings.upiId) {
-        setUpiId(settings.upiId)
+      const value = settings.upi_id || settings.upiId
+      if (value) {
+        setUpiId(value)
       }
     } catch (error) {
       const savedUpiId = localStorage.getItem("adminUpiId")
       if (savedUpiId) {
         setUpiId(savedUpiId)
       }
+    }
+  }
+
+  const loadBusinessInfo = async () => {
+    try {
+      const res = await api.settings.getBusiness()
+      if (res.business_name) setBusinessName(res.business_name)
+      if (res.address) setBusinessAddress(res.address)
+    } catch (e) {
+      // ignore, keep defaults
     }
   }
 
@@ -329,7 +343,7 @@ export function BillingSystem() {
   }
 
   const generateQRCode = (amount: number) => {
-    const merchantName = "STAR TAILORS"
+    const merchantName = businessName || "STAR TAILORS"
     const upiString = `upi://pay?pa=${upiId}&pn=${merchantName}&am=${amount}&cu=INR`
     const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(upiString)}`
     return qrCodeUrl
@@ -1032,9 +1046,9 @@ export function BillingSystem() {
             {currentBill && (
               <div className="space-y-6 print:space-y-4" id="bill-content">
                 <div className="text-center border-b pb-4">
-                  <h1 className="text-2xl font-bold text-violet-900">STAR TAILORS</h1>
+                  <h1 className="text-2xl font-bold text-violet-900">{businessName || "STAR TAILORS"}</h1>
                   <p className="text-sm text-gray-600">Professional Tailoring Services</p>
-                  <p className="text-sm text-gray-600">Baramati, Maharashtra</p>
+                  <p className="text-sm text-gray-600">{businessAddress}</p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4 text-sm">

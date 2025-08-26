@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -23,7 +23,8 @@ import { toast } from "sonner"
 import { api } from "@/lib/api"
 
 interface Tailor {
-  id: string
+  id?: string
+  _id?: string
   name: string
   phone: string
   email?: string
@@ -42,6 +43,7 @@ interface Job {
   bill_id: string
   tailor_id: string
   tailor_name?: string
+  tailor_phone?: string
   customer_name: string
   customer_phone: string
   items: Array<{
@@ -219,8 +221,14 @@ export function TailorManagement() {
       }
 
       // Prepare job data
+      // Backend requires a title; generate a sensible one
+      const jobTitle = `${newJob.customer_name || "Customer"} - ${newJob.item_type || "Tailoring Job"}`
+
       const jobData: any = {
+        title: jobTitle,
         tailor_id: newJob.tailor_id,
+        description: newJob.description,
+        // Extra metadata (backend currently ignores these, but keep for forward compatibility)
         customer_name: newJob.customer_name,
         customer_phone: newJob.customer_phone,
         items: [
@@ -340,19 +348,45 @@ export function TailorManagement() {
     return getBillIdSuffix(id)
   }
 
-  const filteredTailors = tailors.filter(
-    (tailor) =>
-      tailor.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      tailor.phone.includes(searchTerm) ||
-      tailor.specialization.toLowerCase().includes(searchTerm.toLowerCase()),
-  )
+  // Enrich jobs with tailor details and bill items/phone
+  const enrichedJobs: Job[] = useMemo(() => {
+    return jobs.map((job) => {
+      const tailor = tailors.find((t) => String(t.id || t._id) === String(job.tailor_id))
+      const bill = bills.find((b) => (b.id || b._id) === job.bill_id)
 
-  const filteredJobs = jobs.filter(
-    (job) =>
-      job.customer_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      job.customer_phone.includes(searchTerm) ||
-      job.items.some((item) => item.type.toLowerCase().includes(searchTerm.toLowerCase())),
-  )
+      const mergedItems = job.items && job.items.length > 0
+        ? job.items
+        : (bill?.items?.map((item) => ({
+            type: item.type,
+            description: item.description,
+            measurements: item.measurements || {},
+          })) || [])
+
+      return {
+        ...job,
+        items: mergedItems,
+        customer_phone: job.customer_phone || bill?.customer_phone || "",
+        tailor_name: job.tailor_name || tailor?.name,
+        tailor_phone: tailor?.phone,
+      }
+    })
+  }, [jobs, tailors, bills])
+
+  const filteredTailors = tailors.filter(
+  (tailor) =>
+    (tailor.name?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+    (tailor.phone || "").includes(searchTerm) ||
+    (tailor.specialization?.toLowerCase() || "").includes(searchTerm.toLowerCase()),
+)
+
+const filteredJobs = enrichedJobs.filter(
+  (job) =>
+    (job.customer_name?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+    (job.customer_phone || "").includes(searchTerm) ||
+    job.items.some((item) => 
+      (item.type?.toLowerCase() || "").includes(searchTerm.toLowerCase())
+    ),
+)
 
   const handleBillSelection = async (billId: string) => {
     const selectedBill = bills.find((bill) => (bill.id || bill._id) === billId)
@@ -652,11 +686,14 @@ export function TailorManagement() {
                       <SelectContent>
                         {tailors
                           .filter((tailor) => tailor.status === "active")
-                          .map((tailor) => (
-                            <SelectItem key={tailor.id} value={tailor.id}>
-                              {tailor.name} - {tailor.specialization} ({tailor.pending_jobs || 0} pending)
-                            </SelectItem>
-                          ))}
+                          .map((tailor) => {
+                            const value = String(tailor.id || tailor._id || "")
+                            return (
+                              <SelectItem key={value} value={value}>
+                                {tailor.name} - {tailor.specialization} ({tailor.pending_jobs || 0} pending)
+                              </SelectItem>
+                            )
+                          })}
                       </SelectContent>
                     </Select>
                   </div>
@@ -879,12 +916,12 @@ export function TailorManagement() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-4">
-                    {jobs.slice(0, 5).map((job) => (
+                    {enrichedJobs.slice(0, 5).map((job) => (
                       <div key={job.id} className="flex items-center justify-between p-3 bg-violet-50 rounded-lg">
                         <div className="flex-1">
                           <p className="font-medium text-gray-900">{job.customer_name}</p>
                           <p className="text-sm text-gray-600">
-                            {job.items[0]?.type} - {job.tailor_name}
+                            {job.items && job.items.length > 0 ? job.items.map((i) => i.type).join(', ') : 'No items'} - {job.tailor_name || 'Unassigned'}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
@@ -1030,13 +1067,16 @@ export function TailorManagement() {
                                 <strong>Tailor:</strong> {job.tailor_name || "Unassigned"}
                               </p>
                               <p>
+                                <strong>Tailor Phone:</strong> {job.tailor_phone || "N/A"}
+                              </p>
+                              <p>
                                 <strong>Assigned:</strong> {new Date(job.assigned_date).toLocaleDateString()}
                               </p>
                             </div>
                           </div>
                           <div className="mt-2">
                             <p className="text-sm text-gray-600">
-                              <strong>Items:</strong> {job.items.map((item) => item.type).join(", ")}
+                              <strong>Items:</strong> {job.items ? job.items.map((item) => item.type).join(", ") : "No items"}
                             </p>
                             {job.instructions && (
                               <p className="text-sm text-gray-600 mt-1">

@@ -29,8 +29,6 @@ import {
   Loader2,
   Search,
   Filter,
-  Eye,
-  Edit,
   CheckCircle,
   XCircle,
   Package,
@@ -64,6 +62,9 @@ interface Bill {
   status: "pending" | "in_progress" | "completed"
   createdAt: string
   notes?: string
+  // Augmented fields: job status coming from tailor-management (jobs)
+  jobStatus?: "pending" | "assigned" | "acknowledged" | "in_progress" | "completed" | "delivered"
+  jobId?: string
 }
 
 interface Tailor {
@@ -81,7 +82,7 @@ interface Job {
   bill_id: string
   tailor_id: string
   itemType: string
-  status: "assigned" | "acknowledged" | "in_progress" | "completed"
+  status: "assigned" | "acknowledged" | "in_progress" | "completed" | "delivered"
   priority: "low" | "medium" | "high"
   createdAt: string
   instructions?: string
@@ -132,6 +133,7 @@ export function AdminDashboard() {
   const [activeTab, setActiveTab] = useState("overview")
   const [upiId, setUpiId] = useState("")
   const [businessName, setBusinessName] = useState("STAR TAILORS")
+  const [businessInfo, setBusinessInfo] = useState<{ address?: string; phone?: string; email?: string }>({})
   const [isEditingUpi, setIsEditingUpi] = useState(false)
   const [qrCodeUrl, setQrCodeUrl] = useState("")
   const [loading, setLoading] = useState(true)
@@ -144,6 +146,7 @@ export function AdminDashboard() {
   const [orderSortBy, setOrderSortBy] = useState("newest")
   const [selectedOrder, setSelectedOrder] = useState<Bill | null>(null)
   const [showOrderDetails, setShowOrderDetails] = useState(false)
+  const [jobsList, setJobsList] = useState<Job[]>([])
 
   const generateAdminQRCode = (upiId: string, amount = 100) => {
     if (!upiId.trim()) return ""
@@ -177,16 +180,17 @@ export function AdminDashboard() {
       }
 
       // Load data with proper error handling
-      const [customersRes, billsRes, tailorsRes, jobsRes, upiRes] = await Promise.all([
+      const [customersRes, billsRes, tailorsRes, jobsRes, upiRes, bizRes] = await Promise.all([
         api.customers.getAll().catch((e) => ({ customers: [], error: e.message })),
-        api.bills.getAll().catch((e) => ({ bills: [], error: e.message })),
+        api.bills.getAll({ limit: 1000 }).catch((e) => ({ bills: [], error: e.message })),
         api.tailors.getAll().catch((e) => ({ tailors: [], error: e.message })),
-        api.jobs.getAll().catch((e) => ({ jobs: [], error: e.message })),
+        api.jobs.getAll({ limit: 1000 }).catch((e) => ({ jobs: [], error: e.message })),
         api.settings.getUpi().catch((e) => ({ upiId: "startailors@paytm", error: e.message })),
+        api.settings.getBusiness().catch((e) => ({ business_name: "STAR TAILORS", error: e.message })),
       ])
 
       // Check for errors in responses
-      const errors = [customersRes.error, billsRes.error, tailorsRes.error, jobsRes.error, upiRes.error].filter(Boolean)
+      const errors = [customersRes.error, billsRes.error, tailorsRes.error, jobsRes.error, upiRes.error, bizRes.error].filter(Boolean)
 
       if (errors.length > 0) {
         console.error("Errors loading data:", errors)
@@ -195,29 +199,62 @@ export function AdminDashboard() {
 
       // Process data
       const customers: Customer[] = customersRes.customers || []
-      const bills: Bill[] = billsRes.bills || []
+      const rawBills: any[] = billsRes.bills || []
       const tailors: Tailor[] = tailorsRes.tailors || []
       const jobs: Job[] = jobsRes.jobs || []
 
-      setOrders(bills)
-      setFilteredOrders(bills)
+      // Normalize bill fields from backend -> UI shape
+      const normalizedBills: Bill[] = rawBills.map((b: any) => ({
+        _id: b._id,
+        customerName: b.customer_name || b.customer?.name || b.customerName,
+        customer_id: b.customer_id,
+        items: Array.isArray(b.items)
+          ? b.items.map((it: any) => ({
+              itemType: it.itemType || it.type || "",
+              quantity: it.quantity ?? it.qty ?? 0,
+              rate: it.rate ?? it.price ?? 0,
+              amount: it.amount ?? it.total ?? (it.quantity ?? 0) * (it.price ?? 0),
+            }))
+          : [],
+        subtotal: b.subtotal ?? 0,
+        discount: b.discount ?? 0,
+        advanceAmount: b.advance ?? b.advanceAmount ?? 0,
+        totalAmount: b.total ?? b.totalAmount ?? 0,
+        status: b.status || "pending",
+        createdAt: b.created_at || b.createdAt || new Date().toISOString(),
+        notes: b.special_instructions || b.notes,
+      }))
+
+      // Merge job status into bills for Orders tab
+      const mergedOrders: Bill[] = normalizedBills.map((bill) => {
+        const job = jobs.find((j) => j.bill_id === bill._id)
+        return {
+          ...bill,
+          jobStatus: (job?.status as any) || (bill.status as any) || "pending",
+          jobId: job?._id,
+        }
+      })
+
+      setJobsList(jobs)
+      setOrders(mergedOrders)
+      setFilteredOrders(mergedOrders)
 
       // ... existing stats calculation code ...
-      const activeOrders = bills.filter(
+      const activeOrders = normalizedBills.filter(
         (bill: Bill) => bill.status === "pending" || bill.status === "in_progress",
       ).length
-      const completedOrders = bills.filter((bill: Bill) => bill.status === "completed").length
-      const totalRevenue = bills.reduce((sum: number, bill: Bill) => sum + (bill.totalAmount || 0), 0)
+      const completedOrders = normalizedBills.filter((bill: Bill) => bill.status === "completed").length
+      const totalRevenue = normalizedBills.reduce((sum: number, bill: Bill) => sum + (bill.totalAmount || 0), 0)
       const currentMonth = new Date().getMonth()
       const currentYear = new Date().getFullYear()
-      const monthlyRevenue = bills
+      const monthlyRevenue = normalizedBills
         .filter((bill: Bill) => {
           const billDate = new Date(bill.createdAt)
           return billDate.getMonth() === currentMonth && billDate.getFullYear() === currentYear
         })
         .reduce((sum: number, bill: Bill) => sum + (bill.totalAmount || 0), 0)
 
-      const outstandingAmount = bills
+      const outstandingAmount = normalizedBills
         .filter((bill: Bill) => bill.status === "pending")
         .reduce((sum: number, bill: Bill) => sum + ((bill.totalAmount || 0) - (bill.advanceAmount || 0)), 0)
 
@@ -239,7 +276,7 @@ export function AdminDashboard() {
       const activity: RecentActivity[] = []
 
       // Add recent bills
-      bills.slice(0, 3).forEach((bill: Bill) => {
+      normalizedBills.slice(0, 3).forEach((bill: Bill) => {
         activity.push({
           id: `bill-${bill._id}`,
           type: "order",
@@ -290,13 +327,11 @@ export function AdminDashboard() {
       setAlerts(alertsList)
 
       // Set UPI settings
-      if (upiRes.upiId) {
-        setUpiId(upiRes.upiId)
-        setQrCodeUrl(generateAdminQRCode(upiRes.upiId))
-      } else {
-        setUpiId("startailors@paytm")
-        setQrCodeUrl(generateAdminQRCode("startailors@paytm"))
-      }
+      const upiVal = (upiRes && (upiRes.upi_id || upiRes.upiId)) || "startailors@paytm"
+      const bizName = (upiRes && (upiRes.business_name || upiRes.businessName)) || businessName || "STAR TAILORS"
+      setUpiId(upiVal)
+      setBusinessName(bizName)
+      setQrCodeUrl(generateAdminQRCode(upiVal))
     } catch (err: any) {
       console.error("Error loading dashboard data:", err)
       setError(err.message || "Failed to load dashboard data")
@@ -323,9 +358,9 @@ export function AdminDashboard() {
       )
     }
 
-    // Filter by status
+    // Filter by job status (from Tailor Management)
     if (orderStatusFilter !== "all") {
-      filtered = filtered.filter((order) => order.status === orderStatusFilter)
+      filtered = filtered.filter((order) => (order.jobStatus || "pending") === orderStatusFilter)
     }
 
     // Sort orders
@@ -389,12 +424,29 @@ export function AdminDashboard() {
     }
   }
 
+  // Business Information state and update
+
   const handleUpiChange = (value: string) => {
     setUpiId(value)
     if (value.trim()) {
       setQrCodeUrl(generateAdminQRCode(value.trim()))
     } else {
       setQrCodeUrl("")
+    }
+  }
+
+  const handleBusinessUpdate = async () => {
+    try {
+      await api.settings.updateBusiness({
+        business_name: businessName.trim() || "STAR TAILORS",
+        address: businessInfo.address || "",
+        phone: businessInfo.phone || "",
+        email: businessInfo.email || "",
+      })
+      alert("Business information updated for new bills.")
+    } catch (err: any) {
+      console.error("Error updating business info:", err)
+      alert("Failed to update business information. Please try again.")
     }
   }
 
@@ -452,12 +504,18 @@ export function AdminDashboard() {
 
   const getStatusColor = (status: string) => {
     switch (status) {
+      case "assigned":
+        return "bg-blue-100 text-blue-800 border-blue-200"
+      case "acknowledged":
+        return "bg-indigo-100 text-indigo-800 border-indigo-200"
+      case "in_progress":
+        return "bg-yellow-100 text-yellow-800 border-yellow-200"
       case "completed":
         return "bg-green-100 text-green-800 border-green-200"
-      case "in_progress":
-        return "bg-blue-100 text-blue-800 border-blue-200"
+      case "delivered":
+        return "bg-purple-100 text-purple-800 border-purple-200"
       case "pending":
-        return "bg-yellow-100 text-yellow-800 border-yellow-200"
+        return "bg-orange-100 text-orange-800 border-orange-200"
       default:
         return "bg-gray-100 text-gray-800 border-gray-200"
     }
@@ -465,10 +523,14 @@ export function AdminDashboard() {
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case "completed":
-        return <CheckCircle className="h-4 w-4" />
+      case "assigned":
+        return <Package className="h-4 w-4" />
+      case "acknowledged":
       case "in_progress":
         return <Clock className="h-4 w-4" />
+      case "completed":
+      case "delivered":
+        return <CheckCircle className="h-4 w-4" />
       case "pending":
         return <Package className="h-4 w-4" />
       default:
@@ -775,7 +837,9 @@ export function AdminDashboard() {
                         <div>
                           <p className="text-sm text-gray-600">Pending</p>
                           <p className="text-2xl font-bold text-yellow-600">
-                            {orders.filter((o) => o.status === "pending").length}
+                            {
+                              orders.filter((o) => (o.jobStatus ?? "pending") === "pending" || o.jobStatus === "assigned").length
+                            }
                           </p>
                         </div>
                         <Package className="h-8 w-8 text-yellow-600" />
@@ -789,7 +853,7 @@ export function AdminDashboard() {
                         <div>
                           <p className="text-sm text-gray-600">In Progress</p>
                           <p className="text-2xl font-bold text-blue-600">
-                            {orders.filter((o) => o.status === "in_progress").length}
+                            {orders.filter((o) => o.jobStatus === "in_progress" || o.jobStatus === "acknowledged").length}
                           </p>
                         </div>
                         <Clock className="h-8 w-8 text-blue-600" />
@@ -803,7 +867,7 @@ export function AdminDashboard() {
                         <div>
                           <p className="text-sm text-gray-600">Completed</p>
                           <p className="text-2xl font-bold text-green-600">
-                            {orders.filter((o) => o.status === "completed").length}
+                            {orders.filter((o) => o.jobStatus === "completed" || o.jobStatus === "delivered").length}
                           </p>
                         </div>
                         <CheckCircle className="h-8 w-8 text-green-600" />
@@ -836,9 +900,11 @@ export function AdminDashboard() {
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="all">All Status</SelectItem>
-                            <SelectItem value="pending">Pending</SelectItem>
+                            <SelectItem value="pending">Pending (no job)</SelectItem>
+                            <SelectItem value="assigned">Assigned</SelectItem>
                             <SelectItem value="in_progress">In Progress</SelectItem>
                             <SelectItem value="completed">Completed</SelectItem>
+                            <SelectItem value="delivered">Delivered</SelectItem>
                           </SelectContent>
                         </Select>
 
@@ -883,9 +949,9 @@ export function AdminDashboard() {
                             <div className="flex-1">
                               <div className="flex items-center gap-3 mb-2">
                                 <h3 className="font-semibold text-gray-900">{order.customerName}</h3>
-                                <Badge className={`${getStatusColor(order.status)} border`}>
-                                  {getStatusIcon(order.status)}
-                                  <span className="ml-1 capitalize">{order.status.replace("_", " ")}</span>
+                                <Badge className={`${getStatusColor(order.jobStatus || "pending")} border`}>
+                                  {getStatusIcon(order.jobStatus || "pending")}
+                                  <span className="ml-1 capitalize">{(order.jobStatus || "pending").replace("_", " ")}</span>
                                 </Badge>
                               </div>
 
@@ -918,32 +984,6 @@ export function AdminDashboard() {
                             </div>
 
                             <div className="flex flex-col md:flex-row gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleViewOrderDetails(order)}
-                                className="border-violet-200 hover:bg-violet-50"
-                              >
-                                <Eye className="h-4 w-4 mr-2" />
-                                View Details
-                              </Button>
-
-                              {order.status !== "completed" && (
-                                <Select
-                                  value={order.status}
-                                  onValueChange={(value) => handleOrderStatusUpdate(order._id, value as any)}
-                                >
-                                  <SelectTrigger className="w-32 bg-white/80 border-violet-200">
-                                    <Edit className="h-4 w-4 mr-2" />
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="pending">Pending</SelectItem>
-                                    <SelectItem value="in_progress">In Progress</SelectItem>
-                                    <SelectItem value="completed">Completed</SelectItem>
-                                  </SelectContent>
-                                </Select>
-                              )}
                             </div>
                           </div>
                         </CardContent>
@@ -1355,19 +1395,21 @@ export function AdminDashboard() {
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                      <div className="space-y-3">
+                    <div className="space-y-3">
                         <div>
                           <label className="text-sm font-medium text-gray-700">Business Name</label>
                           <input
                             type="text"
-                            defaultValue="STAR TAILORS"
+                            value={businessName}
+                            onChange={(e) => setBusinessName(e.target.value)}
                             className="w-full mt-1 px-3 py-2 border border-violet-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent bg-white/80 backdrop-blur-sm"
                           />
                         </div>
                         <div>
                           <label className="text-sm font-medium text-gray-700">Address</label>
                           <textarea
-                            defaultValue="123 Fashion Street, Textile Market, Mumbai - 400001"
+                            value={(businessInfo.address ?? "") as string}
+                            onChange={(e) => setBusinessInfo((prev: any) => ({ ...prev, address: e.target.value }))}
                             className="w-full mt-1 px-3 py-2 border border-violet-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent bg-white/80 backdrop-blur-sm"
                             rows={3}
                           />
@@ -1376,7 +1418,8 @@ export function AdminDashboard() {
                           <label className="text-sm font-medium text-gray-700">Phone Number</label>
                           <input
                             type="tel"
-                            defaultValue="+91 98765 43210"
+                            value={(businessInfo.phone ?? "") as string}
+                            onChange={(e) => setBusinessInfo((prev: any) => ({ ...prev, phone: e.target.value }))}
                             className="w-full mt-1 px-3 py-2 border border-violet-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent bg-white/80 backdrop-blur-sm"
                           />
                         </div>
@@ -1384,13 +1427,14 @@ export function AdminDashboard() {
                           <label className="text-sm font-medium text-gray-700">Email</label>
                           <input
                             type="email"
-                            defaultValue="info@startailors.com"
+                            value={(businessInfo.email ?? "") as string}
+                            onChange={(e) => setBusinessInfo((prev: any) => ({ ...prev, email: e.target.value }))}
                             className="w-full mt-1 px-3 py-2 border border-violet-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent bg-white/80 backdrop-blur-sm"
                           />
                         </div>
                       </div>
 
-                      <Button className="w-full bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-600 hover:to-indigo-600 text-white">
+                      <Button onClick={handleBusinessUpdate} className="w-full bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-600 hover:to-indigo-600 text-white">
                         Update Business Information
                       </Button>
                     </CardContent>

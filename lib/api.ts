@@ -57,6 +57,15 @@ const makeRequest = async (endpoint: string, options: RequestInit = {}) => {
   }
 }
 
+// Helpers
+function normalizeList<T = any>(data: any, key: string): T[] {
+  if (Array.isArray(data)) return data as T[]
+  if (data && Array.isArray(data[key])) return data[key] as T[]
+  if (data && Array.isArray(data.data)) return data.data as T[]
+  if (data && data.results && Array.isArray(data.results)) return data.results as T[]
+  return []
+}
+
 // Authentication API
 export const authAPI = {
   login: async (username: string, password: string) => {
@@ -151,7 +160,7 @@ export const billsAPI = {
       page?: number
       limit?: number
     } = {},
-  ) => {
+  ): Promise<{ bills: any[] }> => {
     const searchParams = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => {
       if (value !== undefined && value !== null && value !== "") {
@@ -159,7 +168,8 @@ export const billsAPI = {
       }
     })
 
-    return makeRequest(`/bills?${searchParams.toString()}`)
+    const data = await makeRequest(`/bills?${searchParams.toString()}`)
+    return { bills: normalizeList<any>(data, "bills") }
   },
 
   getById: async (id: string) => {
@@ -256,7 +266,7 @@ export const tailorsAPI = {
       page?: number
       limit?: number
     } = {},
-  ) => {
+  ): Promise<{ tailors: any[] }> => {
     const searchParams = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => {
       if (value !== undefined && value !== null && value !== "") {
@@ -264,7 +274,9 @@ export const tailorsAPI = {
       }
     })
 
-    return makeRequest(`/tailors?${searchParams.toString()}`)
+    const data = await makeRequest(`/tailors?${searchParams.toString()}`)
+    const tailors = normalizeList<any>(data, "tailors").map((t: any) => ({ ...t, id: t?.id || t?._id }))
+    return { tailors }
   },
 
   getById: async (id: string) => {
@@ -331,7 +343,7 @@ export const jobsAPI = {
       page?: number
       limit?: number
     } = {},
-  ) => {
+  ): Promise<{ jobs: any[] }> => {
     const searchParams = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => {
       if (value !== undefined && value !== null && value !== "") {
@@ -339,7 +351,13 @@ export const jobsAPI = {
       }
     })
 
-    return makeRequest(`/jobs?${searchParams.toString()}`)
+    const data = await makeRequest(`/jobs?${searchParams.toString()}`)
+    const jobs = normalizeList<any>(data, "jobs").map((j: any) => ({
+      ...j,
+      id: j?.id || j?._id,
+      assigned_date: j?.assigned_date || j?.createdAt || j?.created_at || j?.assignedAt,
+    }))
+    return { jobs }
   },
 
   getById: async (id: string) => {
@@ -421,6 +439,17 @@ export const settingsAPI = {
       body: JSON.stringify({ upi_id, business_name }),
     })
   },
+
+  getBusiness: async () => {
+    return makeRequest("/settings/business")
+  },
+
+  updateBusiness: async (payload: { business_name: string; address?: string; phone?: string; email?: string }) => {
+    return makeRequest("/settings/business", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    })
+  },
 }
 
 // Reports API
@@ -481,6 +510,8 @@ export const api = {
   settings: {
     getUpi: settingsAPI.getUPI,
     updateUpi: settingsAPI.updateUPI,
+    getBusiness: settingsAPI.getBusiness,
+    updateBusiness: settingsAPI.updateBusiness,
   },
 }
 

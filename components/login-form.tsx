@@ -155,7 +155,7 @@ export function LoginForm() {
 
         <div className="text-center pt-4">
           <p className="text-sm text-gray-500">Crafted with precision for tailoring professionals</p>
-          <p className="text-xs text-gray-400 mt-2">Demo: admin / admin123</p>
+          <p className="text-xs text-gray-400 mt-2">Demo: admin / admin123 | tailor / tailor123 | billing / billing123</p>
         </div>
       </CardContent>
     </Card>
