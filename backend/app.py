@@ -14,7 +14,7 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'rahul@123')
 
 # Read frontend URL for CORS from env (default to localhost)
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
@@ -36,7 +36,7 @@ def handle_preflight():
         return response, 200
 
 # MongoDB connection
-MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/star_tailors')
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://algoflicks664:LSVMdAh5klVEB85s@star-tailor-management.yb3aynz.mongodb.net/?retryWrites=true&w=majority&appName=Star-Tailor-Management')
 client = MongoClient(MONGO_URI)
 db = client.star_tailors
 
