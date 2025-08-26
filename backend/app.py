@@ -16,8 +16,11 @@ load_dotenv()
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
 
+# Read frontend URL for CORS from env (default to localhost)
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+
 # Comprehensive CORS setup
-CORS(app, origins=['http://localhost:3000'], 
+CORS(app, origins=[FRONTEND_URL], 
      supports_credentials=True,
      methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
      allow_headers=['Content-Type', 'Authorization', 'X-Requested-With'])
@@ -27,9 +30,9 @@ CORS(app, origins=['http://localhost:3000'],
 def handle_preflight():
     if request.method == "OPTIONS":
         response = jsonify()
-        response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
+        response.headers.add('Access-Control-Allow-Origin', FRONTEND_URL)
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH')
         return response, 200
 
 # MongoDB connection
@@ -1355,4 +1358,5 @@ def export_report(current_user):
 
 if __name__ == '__main__':
     init_default_user()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.getenv('PORT', '5000'))
+    app.run(debug=True, host='0.0.0.0', port=port)
