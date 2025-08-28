@@ -37,7 +37,6 @@ def handle_preflight():
         return response, 200
 
 # MongoDB connection with SSL fix
-# MongoDB connection with SSL fix
 MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://algoflicks664:LSVMdAh5klVEB85s@star-tailor-management.yb3aynz.mongodb.net/?retryWrites=true&w=majority&appName=Star-Tailor-Management')
 
 # Initialize collections as None initially
@@ -99,7 +98,7 @@ except Exception as e:
 db = client.star_tailors if client else None
 
 # Collections (with fallbacks to prevent crashes)
-if client:
+if client is not None:
     users_collection = db.users
     customers_collection = db.customers
     bills_collection = db.bills
@@ -113,7 +112,6 @@ else:
     tailors_collection = settings_collection = jobs_collection = counters_collection = None
     print("⚠️  Running in dummy mode without database connection")
 
-# JWT token decorator
 # JWT token decorator
 def token_required(f):
     @wraps(f)
@@ -139,7 +137,7 @@ def token_required(f):
             else:
                 current_user = users_collection.find_one({'_id': ObjectId(data['user_id'])})
             
-            if not current_user:
+            if current_user is None:
                 return jsonify({'message': 'Token is invalid'}), 401
                 
         except jwt.ExpiredSignatureError:
@@ -153,7 +151,7 @@ def token_required(f):
 
 # Utility: Atomic sequence generator for bill numbers
 def get_next_sequence(name: str) -> int:
-    if not counters_collection:
+    if counters_collection is None:
         # Fallback for when DB is not available
         return 1
     
@@ -167,7 +165,7 @@ def get_next_sequence(name: str) -> int:
         return int(doc.get('seq', 1))
     except Exception:
         # Fallback in case counters collection isn't available
-        return bills_collection.count_documents({}) + 1 if bills_collection else 1
+        return bills_collection.count_documents({}) + 1 if bills_collection is not None else 1
 
 def format_bill_no(n: int, width: int = 3) -> str:
     try:
@@ -175,7 +173,6 @@ def format_bill_no(n: int, width: int = 3) -> str:
     except Exception:
         return str(n)
 
-# Initialize default admin user
 # Initialize default admin user
 def init_default_user():
     if users_collection is None:
@@ -190,7 +187,7 @@ def init_default_user():
     ]
     for username, pwd, role in defaults:
         exists = users_collection.find_one({'username': username})
-        if not exists:
+        if exists is None:
             hashed_password = bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt())
             user_doc = {
                 'username': username,
@@ -218,7 +215,8 @@ def login():
             return jsonify({'message': 'Username and password are required'}), 400
         
         # For development when DB is not available
-        if not users_collection:
+        if users_collection is None:
+            print("Using demo mode login")
             if username == 'admin' and password == 'admin123':
                 token = jwt.encode({
                     'user_id': str(ObjectId()),
@@ -241,7 +239,7 @@ def login():
         
         user = users_collection.find_one({'username': username})
         
-        if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
+        if user is not None and bcrypt.checkpw(password.encode('utf-8'), user['password']):
             token = jwt.encode({
                 'user_id': str(user['_id']),
                 'username': user['username'],
@@ -262,8 +260,11 @@ def login():
             return jsonify({'message': 'Invalid credentials'}), 401
             
     except Exception as e:
+        print(f"Login error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'message': 'Login failed', 'error': str(e)}), 500
-
+    
 @app.route('/api/auth/verify', methods=['GET', 'OPTIONS'])
 @token_required
 def verify_token(current_user):
@@ -287,7 +288,7 @@ def get_customers(current_user):
         
     try:
         # For development when DB is not available
-        if not customers_collection:
+        if customers_collection is None:
             return jsonify({
                 'customers': [],
                 'pagination': {
@@ -354,7 +355,7 @@ def create_customer(current_user):
         
     try:
         # For development when DB is not available
-        if not customers_collection:
+        if customers_collection is None:
             data = request.get_json()
             return jsonify({
                 'message': 'Customer created successfully (demo mode)',
@@ -381,7 +382,7 @@ def create_customer(current_user):
             return jsonify({'message': 'Name and phone are required'}), 400
         
         existing_customer = customers_collection.find_one({'phone': phone})
-        if existing_customer:
+        if existing_customer is not None:
             return jsonify({'message': 'Customer with this phone number already exists'}), 409
         
         new_customer = {
@@ -415,7 +416,7 @@ def get_customer_by_id(current_user, customer_id):
         
     try:
         # For development when DB is not available
-        if not customers_collection:
+        if customers_collection is None:
             return jsonify({
                 'customer': {
                     '_id': customer_id,
@@ -434,7 +435,7 @@ def get_customer_by_id(current_user, customer_id):
             }), 200
             
         customer = customers_collection.find_one({'_id': ObjectId(customer_id)})
-        if not customer:
+        if customer is None:
             return jsonify({'message': 'Customer not found'}), 404
         
         customer['_id'] = str(customer['_id'])
@@ -445,7 +446,7 @@ def get_customer_by_id(current_user, customer_id):
         
         # Get customer's bills
         bills = []
-        if bills_collection:
+        if bills_collection is not None:
             bills = list(bills_collection.find({'customer_id': ObjectId(customer_id)}))
             for bill in bills:
                 bill['_id'] = str(bill['_id'])
@@ -473,7 +474,7 @@ def update_customer(current_user, customer_id):
         
     try:
         # For development when DB is not available
-        if not customers_collection:
+        if customers_collection is None:
             data = request.get_json()
             return jsonify({
                 'message': 'Customer updated successfully (demo mode)',
@@ -492,7 +493,7 @@ def update_customer(current_user, customer_id):
         data = request.get_json()
         
         customer = customers_collection.find_one({'_id': ObjectId(customer_id)})
-        if not customer:
+        if customer is None:
             return jsonify({'message': 'Customer not found'}), 404
         
         update_data = {
@@ -533,7 +534,7 @@ def delete_customer(current_user, customer_id):
         
     try:
         # For development when DB is not available
-        if not customers_collection:
+        if customers_collection is None:
             return jsonify({'message': 'Customer deleted successfully (demo mode)'}), 200
             
         result = customers_collection.delete_one({'_id': ObjectId(customer_id)})
@@ -542,7 +543,7 @@ def delete_customer(current_user, customer_id):
             return jsonify({'message': 'Customer not found'}), 404
         
         # Also delete associated bills
-        if bills_collection:
+        if bills_collection is not None:
             bills_collection.delete_many({'customer_id': ObjectId(customer_id)})
         
         return jsonify({'message': 'Customer deleted successfully'}), 200
@@ -558,7 +559,7 @@ def get_customer_stats(current_user):
         
     try:
         # For development when DB is not available
-        if not customers_collection:
+        if customers_collection is None:
             return jsonify({
                 'total_customers': 0,
                 'customers_with_outstanding': 0,
@@ -607,7 +608,7 @@ def get_customer_stats(current_user):
             }
         ]
         
-        outstanding_amount_result = list(bills_collection.aggregate(pipeline))
+        outstanding_amount_result = list(bills_collection.aggregate(pipeline)) if bills_collection is not None else []
         total_outstanding_amount = outstanding_amount_result[0]['total_outstanding'] if outstanding_amount_result else 0
         
         return jsonify({
@@ -628,7 +629,7 @@ def get_bills(current_user):
         
     try:
         # For development when DB is not available
-        if not bills_collection:
+        if bills_collection is None:
             return jsonify({
                 'bills': [],
                 'pagination': {
@@ -692,7 +693,7 @@ def get_bills(current_user):
                 bill['updated_at'] = bill['updated_at'].isoformat()
                 
                 customer = customers_collection.find_one({'_id': ObjectId(bill['customer_id'])})
-                if customer:
+                if customer is not None:
                     bill['customer'] = {
                         'name': customer['name'],
                         'phone': customer['phone']
@@ -739,7 +740,7 @@ def create_bill(current_user):
                 return jsonify({'message': f'Missing required field: {field}'}), 400
 
         # For development when DB is not available
-        if not bills_collection:
+        if bills_collection is None:
             next_no = 1
             bill_no_str = format_bill_no(next_no, 3)
             
@@ -779,7 +780,7 @@ def create_bill(current_user):
             return jsonify({'message': 'Invalid customer ID format'}), 400
             
         customer = customers_collection.find_one({'_id': customer_id})
-        if not customer:
+        if customer is None:
             return jsonify({'message': 'Customer not found'}), 404
 
         if not isinstance(data['items'], list) or len(data['items']) == 0:
@@ -843,10 +844,10 @@ def get_upi_settings(current_user):
         
     try:
         settings = None
-        if settings_collection:
+        if settings_collection is not None:
             settings = settings_collection.find_one({'type': 'upi_settings'})
             
-        if not settings:
+        if settings is None:
             return jsonify({
                 'upi_id': 'startailors@paytm',
                 'business_name': 'Star Tailors'
@@ -871,7 +872,7 @@ def update_upi_settings(current_user):
             return jsonify({'message': 'Access denied'}), 403
         
         # For development when DB is not available
-        if not settings_collection:
+        if settings_collection is None:
             return jsonify({'message': 'UPI settings updated successfully (demo mode)'}), 200
             
         data = request.get_json()
@@ -906,10 +907,10 @@ def get_business_settings(current_user):
         return jsonify(), 200
     try:
         settings = None
-        if settings_collection:
+        if settings_collection is not None:
             settings = settings_collection.find_one({'type': 'business_info'})
             
-        if not settings:
+        if settings is None:
             # Defaults
             return jsonify({
                 'business_name': 'STAR TAILORS',
@@ -936,7 +937,7 @@ def update_business_settings(current_user):
             return jsonify({'message': 'Access denied'}), 403
             
         # For development when DB is not available
-        if not settings_collection:
+        if settings_collection is None:
             return jsonify({'message': 'Business settings updated successfully (demo mode)'}), 200
             
         data = request.get_json()
@@ -965,7 +966,7 @@ def get_tailors(current_user):
         
     try:
         # For development when DB is not available
-        if not tailors_collection:
+        if tailors_collection is None:
             return jsonify({
                 'tailors': [],
                 'pagination': {
@@ -1022,7 +1023,7 @@ def create_tailor(current_user):
         
     try:
         # For development when DB is not available
-        if not tailors_collection:
+        if tailors_collection is None:
             data = request.get_json()
             return jsonify({
                 'message': 'Tailor created successfully (demo mode)',
@@ -1050,7 +1051,7 @@ def create_tailor(current_user):
             return jsonify({'message': 'Name and phone are required'}), 400
         
         existing_tailor = tailors_collection.find_one({'phone': phone})
-        if existing_tailor:
+        if existing_tailor is not None:
             return jsonify({'message': 'Tailor with this phone number already exists'}), 409
         
         new_tailor = {
@@ -1085,7 +1086,7 @@ def get_tailor_jobs(current_user, tailor_id):
         
     try:
         # For development when DB is not available
-        if not tailors_collection or not jobs_collection:
+        if tailors_collection is None or jobs_collection is None:
             return jsonify({
                 'jobs': [],
                 'tailor': {
@@ -1105,10 +1106,10 @@ def get_tailor_jobs(current_user, tailor_id):
             
         tailor = tailors_collection.find_one({'_id': ObjectId(tailor_id)})
         
-        if not tailor:
+        if tailor is None:
             tailor = tailors_collection.find_one({'user_id': tailor_id})
         
-        if not tailor and str(current_user['_id']) == tailor_id:
+        if tailor is None and str(current_user['_id']) == tailor_id:
             new_tailor = {
                 'name': current_user.get('username', 'Unknown Tailor'),
                 'phone': current_user.get('phone', ''),
@@ -1124,7 +1125,7 @@ def get_tailor_jobs(current_user, tailor_id):
             result = tailors_collection.insert_one(new_tailor)
             tailor = tailors_collection.find_one({'_id': result.inserted_id})
         
-        if not tailor:
+        if tailor is None:
             return jsonify({'message': 'Tailor not found'}), 404
         
         status = request.args.get('status', '')
@@ -1180,7 +1181,7 @@ def get_jobs(current_user):
         
     try:
         # For development when DB is not available
-        if not jobs_collection:
+        if jobs_collection is None:
             return jsonify({
                 'jobs': [],
                 'pagination': {
@@ -1223,7 +1224,7 @@ def get_jobs(current_user):
             job['updated_at'] = job['updated_at'].isoformat()
             
             tailor = tailors_collection.find_one({'_id': ObjectId(job['tailor_id'])})
-            if tailor:
+            if tailor is not None:
                 job['tailor'] = {
                     'name': tailor['name'],
                     'phone': tailor['phone']
@@ -1251,7 +1252,7 @@ def create_job(current_user):
         
     try:
         # For development when DB is not available
-        if not jobs_collection:
+        if jobs_collection is None:
             data = request.get_json()
             return jsonify({
                 'message': 'Job created successfully (demo mode)',
@@ -1282,7 +1283,7 @@ def create_job(current_user):
             return jsonify({'message': 'Title and tailor ID are required'}), 400
         
         tailor = tailors_collection.find_one({'_id': ObjectId(tailor_id)})
-        if not tailor:
+        if tailor is None:
             return jsonify({'message': 'Tailor not found'}), 404
         
         new_job = {
@@ -1321,7 +1322,7 @@ def update_job_status(current_user, job_id):
         
     try:
         # For development when DB is not available
-        if not jobs_collection:
+        if jobs_collection is None:
             return jsonify({'message': 'Job status updated successfully (demo mode)'}), 200
             
         data = request.get_json()
@@ -1361,7 +1362,8 @@ def get_dashboard_stats(current_user):
         
     try:
         # For development when DB is not available
-        if not all([customers_collection, bills_collection, tailors_collection, jobs_collection]):
+        if (customers_collection is None or bills_collection is None or 
+            tailors_collection is None or jobs_collection is None):
             return jsonify({
                 'total_customers': 0,
                 'total_bills': 0,
@@ -1410,7 +1412,7 @@ def health_check():
     if request.method == 'OPTIONS':
         return jsonify(), 200
         
-    db_status = "connected" if client and client.admin.command('ping') else "disconnected"
+    db_status = "connected" if client is not None and client.admin.command('ping') else "disconnected"
     return jsonify({
         'status': 'healthy', 
         'message': 'Star Tailors API is running',
@@ -1426,7 +1428,7 @@ def get_revenue_report(current_user):
         
     try:
         # For development when DB is not available
-        if not bills_collection:
+        if bills_collection is None:
             return jsonify({'revenue_data': []}), 200
             
         from_date = request.args.get('from_date')
@@ -1488,7 +1490,7 @@ def get_customer_report(current_user):
         
     try:
         # For development when DB is not available
-        if not customers_collection:
+        if customers_collection is None:
             return jsonify({'customer_reports': []}), 200
             
         pipeline = [
@@ -1558,7 +1560,7 @@ def get_tailor_report(current_user):
         
     try:
         # For development when DB is not available
-        if not tailors_collection:
+        if tailors_collection is None:
             return jsonify({'tailor_reports': []}), 200
             
         pipeline = [
@@ -1639,7 +1641,7 @@ def get_outstanding_report(current_user):
         
     try:
         # For development when DB is not available
-        if not bills_collection:
+        if bills_collection is None:
             return jsonify({'outstanding_reports': []}), 200
             
         pipeline = [
