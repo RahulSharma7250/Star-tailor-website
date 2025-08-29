@@ -18,7 +18,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'rahul@123')
 
 # Read frontend URL for CORS from env (default to localhost)
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://star-tailor-website-frontend.onrender.com')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://star-tailor-website.vercel.app')
 
 # Comprehensive CORS setup
 CORS(app, origins=[FRONTEND_URL], 
