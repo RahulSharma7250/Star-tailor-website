@@ -9,6 +9,10 @@ from functools import wraps
 import os
 from dotenv import load_dotenv
 import ssl
+import time
+from cachetools import TTLCache
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +29,9 @@ CORS(app, origins=[FRONTEND_URL],
      supports_credentials=True,
      methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
      allow_headers=['Content-Type', 'Authorization', 'X-Requested-With'])
+
+# Simple caching for frequently accessed data
+cache = TTLCache(maxsize=100, ttl=300)  # 5 minute TTL
 
 # Handle preflight requests globally
 @app.before_request
@@ -53,9 +60,14 @@ try:
     client = MongoClient(
         MONGO_URI,
         tls=True,
-        tlsAllowInvalidCertificates=True,  # For testing only, consider proper CA certs for production
+        tlsAllowInvalidCertificates=True,
         retryWrites=True,
-        w='majority'
+        w='majority',
+        connectTimeoutMS=5000,  # 5 second connection timeout
+        socketTimeoutMS=10000,  # 10 second socket timeout
+        serverSelectionTimeoutMS=5000,  # 5 second server selection timeout
+        maxPoolSize=50,  # Increased connection pool size
+        minPoolSize=10
     )
     
     # Test the connection
@@ -72,28 +84,45 @@ try:
     jobs_collection = db.jobs
     counters_collection = db.counters
     
+    # Create indexes for better performance
+    def create_indexes():
+        try:
+            # Customer indexes
+            customers_collection.create_index([("phone", 1)], unique=True)
+            customers_collection.create_index([("name", "text"), ("phone", "text"), ("email", "text")])
+            customers_collection.create_index([("created_at", -1)])
+            
+            # Bill indexes
+            bills_collection.create_index([("customer_id", 1)])
+            bills_collection.create_index([("status", 1)])
+            bills_collection.create_index([("created_at", -1)])
+            bills_collection.create_index([("bill_no", 1)], unique=True)
+            
+            # Tailor indexes
+            tailors_collection.create_index([("phone", 1)], unique=True)
+            tailors_collection.create_index([("name", "text"), ("phone", "text"), ("specialization", "text")])
+            
+            # Job indexes
+            jobs_collection.create_index([("tailor_id", 1)])
+            jobs_collection.create_index([("status", 1)])
+            jobs_collection.create_index([("created_at", -1)])
+            
+            # User indexes
+            users_collection.create_index([("username", 1)], unique=True)
+            
+            print("✅ Database indexes created successfully!")
+        except Exception as e:
+            print(f"⚠️  Index creation error: {str(e)}")
+    
+    # Run index creation in background
+    index_thread = threading.Thread(target=create_indexes)
+    index_thread.daemon = True
+    index_thread.start()
+    
 except Exception as e:
     print(f"❌ MongoDB connection failed: {str(e)}")
-    # Fallback to a simple connection without SSL (not recommended for production)
-    try:
-        client = MongoClient(MONGO_URI)
-        client.admin.command('ping')
-        print("✅ MongoDB connection successful with fallback!")
-        
-        # Set up collections with fallback connection
-        db = client.star_tailors
-        users_collection = db.users
-        customers_collection = db.customers
-        bills_collection = db.bills
-        tailors_collection = db.tailors
-        settings_collection = db.settings
-        jobs_collection = db.jobs
-        counters_collection = db.counters
-        
-    except Exception as fallback_error:
-        print(f"❌ MongoDB fallback connection also failed: {str(fallback_error)}")
-        # Create a dummy client to prevent crashes (for development only)
-        client = None
+    # Create a dummy client to prevent crashes (for development only)
+    client = None
 
 db = client.star_tailors if client else None
 
@@ -127,19 +156,27 @@ def token_required(f):
             
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
             
-            if users_collection is None:
-                # Dummy user for development when DB is not available
-                current_user = {
-                    '_id': ObjectId(),
-                    'username': 'admin',
-                    'role': 'admin'
-                }
-            else:
-                current_user = users_collection.find_one({'_id': ObjectId(data['user_id'])})
+            # Use cache for user lookup
+            cache_key = f"user_{data['user_id']}"
+            current_user = cache.get(cache_key)
             
             if current_user is None:
-                return jsonify({'message': 'Token is invalid'}), 401
+                if users_collection is None:
+                    # Dummy user for development when DB is not available
+                    current_user = {
+                        '_id': ObjectId(),
+                        'username': 'admin',
+                        'role': 'admin'
+                    }
+                else:
+                    current_user = users_collection.find_one({'_id': ObjectId(data['user_id'])}, 
+                                                           {'password': 0})  # Exclude password
                 
+                if current_user is not None:
+                    cache[cache_key] = current_user
+                else:
+                    return jsonify({'message': 'Token is invalid'}), 401
+                    
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Token has expired'}), 401
         except jwt.InvalidTokenError:
@@ -237,15 +274,25 @@ def login():
             else:
                 return jsonify({'message': 'Invalid credentials'}), 401
         
-        user = users_collection.find_one({'username': username})
+        # Use projection to exclude password from initial query
+        user = users_collection.find_one({'username': username}, {'password': 1, 'username': 1, 'role': 1})
         
         if user is not None and bcrypt.checkpw(password.encode('utf-8'), user['password']):
+            # Create token without password
             token = jwt.encode({
                 'user_id': str(user['_id']),
                 'username': user['username'],
                 'role': user['role'],
                 'exp': datetime.utcnow() + timedelta(hours=24)
             }, app.config['SECRET_KEY'], algorithm='HS256')
+            
+            # Cache user data
+            cache_key = f"user_{user['_id']}"
+            cache[cache_key] = {
+                '_id': user['_id'],
+                'username': user['username'],
+                'role': user['role']
+            }
             
             return jsonify({
                 'message': 'Login successful',
@@ -261,8 +308,6 @@ def login():
             
     except Exception as e:
         print(f"Login error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'message': 'Login failed', 'error': str(e)}), 500
     
 @app.route('/api/auth/verify', methods=['GET', 'OPTIONS'])
@@ -279,7 +324,7 @@ def verify_token(current_user):
         }
     }), 200
 
-# Customer Management Routes
+# Customer Management Routes - Optimized
 @app.route('/api/customers', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers(current_user):
@@ -302,7 +347,7 @@ def get_customers(current_user):
             
         search = request.args.get('search', '')
         page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
+        limit = min(int(request.args.get('limit', 10)), 50)  # Limit max results to 50
         skip = (page - 1) * limit
         
         query = {}
@@ -315,7 +360,20 @@ def get_customers(current_user):
                 ]
             }
         
-        customers = list(customers_collection.find(query).skip(skip).limit(limit).sort('_id', -1))
+        # Use projection to only fetch necessary fields
+        projection = {
+            'name': 1,
+            'phone': 1,
+            'email': 1,
+            'address': 1,
+            'created_at': 1,
+            'updated_at': 1
+        }
+        
+        customers = list(customers_collection.find(query, projection)
+                          .skip(skip)
+                          .limit(limit)
+                          .sort('_id', -1))
         total_customers = customers_collection.count_documents(query)
         
         for customer in customers:
@@ -343,8 +401,6 @@ def get_customers(current_user):
         
     except Exception as e:
         print(f"Error in get_customers: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'message': 'Failed to get customers', 'error': str(e)}), 500
 
 @app.route('/api/customers', methods=['POST', 'OPTIONS'])
@@ -444,10 +500,13 @@ def get_customer_by_id(current_user, customer_id):
         if 'updated_at' in customer and customer['updated_at']:
             customer['updated_at'] = customer['updated_at'].isoformat()
         
-        # Get customer's bills
+        # Get customer's bills with projection for performance
         bills = []
         if bills_collection is not None:
-            bills = list(bills_collection.find({'customer_id': ObjectId(customer_id)}))
+            bills = list(bills_collection.find(
+                {'customer_id': ObjectId(customer_id)},
+                {'total': 1, 'balance': 1, 'status': 1, 'created_at': 1, 'bill_no_str': 1}
+            ))
             for bill in bills:
                 bill['_id'] = str(bill['_id'])
                 bill['customer_id'] = str(bill['customer_id'])
@@ -568,7 +627,7 @@ def get_customer_stats(current_user):
             
         total_customers = customers_collection.count_documents({})
         
-        # Count customers with outstanding balances
+        # Count customers with outstanding balances using aggregation for better performance
         pipeline = [
             {
                 '$lookup': {
@@ -580,8 +639,8 @@ def get_customer_stats(current_user):
             },
             {
                 '$match': {
-                    'bills.balance': {'$gt': 0},
-                    'bills.status': 'pending'
+                    'bills.status': 'pending',
+                    'bills.balance': {'$gt': 0}
                 }
             },
             {
@@ -620,7 +679,7 @@ def get_customer_stats(current_user):
     except Exception as e:
         return jsonify({'message': 'Failed to get customer stats', 'error': str(e)}), 500
 
-# Billing System Routes
+# Billing System Routes - Optimized
 @app.route('/api/bills', methods=['GET', 'OPTIONS'])
 @token_required
 def get_bills(current_user):
@@ -645,24 +704,30 @@ def get_bills(current_user):
         status = request.args.get('status', '')
         customer_id = request.args.get('customer_id', '')
         page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
+        limit = min(int(request.args.get('limit', 10)), 50)  # Limit max results
         skip = (page - 1) * limit
         
         query = {}
         
         if search:
+            # Use text search if indexes are available, otherwise use regex
             try:
-                customers = customers_collection.find({
-                    '$or': [
-                        {'name': {'$regex': search, '$options': 'i'}},
-                        {'phone': {'$regex': search, '$options': 'i'}}
-                    ]
-                })
-                customer_ids = [customer['_id'] for customer in customers]
-                if customer_ids:
-                    query['customer_id'] = {'$in': customer_ids}
+                # First try to find customer by ID for exact matches
+                if ObjectId.is_valid(search):
+                    query['customer_id'] = ObjectId(search)
+                else:
+                    # Use text search or fallback to regex
+                    customers = customers_collection.find({
+                        '$or': [
+                            {'name': {'$regex': search, '$options': 'i'}},
+                            {'phone': {'$regex': search, '$options': 'i'}}
+                        ]
+                    }, {'_id': 1}).limit(10)
+                    customer_ids = [customer['_id'] for customer in customers]
+                    if customer_ids:
+                        query['customer_id'] = {'$in': customer_ids}
             except Exception as e:
-                print(f"Error building search query: {str(e)}")
+                print(f"Search optimization error: {str(e)}")
         
         if status:
             query['status'] = status
@@ -673,35 +738,49 @@ def get_bills(current_user):
             except:
                 return jsonify({'message': 'Invalid customer ID format'}), 400
         
-        bills = []
-        try:
-            bills = list(bills_collection.find(query)
-                          .skip(skip)
-                          .limit(limit)
-                          .sort('created_at', -1))
-            total_bills = bills_collection.count_documents(query)
-        except Exception as e:
-            print(f"Error querying bills: {str(e)}")
-            return jsonify({'message': 'Database error', 'error': str(e)}), 500
+        # Use projection to only fetch necessary fields
+        projection = {
+            'customer_id': 1,
+            'customer_name': 1,
+            'customer_phone': 1,
+            'total': 1,
+            'balance': 1,
+            'status': 1,
+            'created_at': 1,
+            'bill_no_str': 1
+        }
+        
+        bills = list(bills_collection.find(query, projection)
+                      .skip(skip)
+                      .limit(limit)
+                      .sort('created_at', -1))
+        total_bills = bills_collection.count_documents(query)
         
         formatted_bills = []
+        customer_cache = {}
+        
         for bill in bills:
             try:
                 bill['_id'] = str(bill['_id'])
                 bill['customer_id'] = str(bill['customer_id'])
                 bill['created_at'] = bill['created_at'].isoformat()
-                bill['updated_at'] = bill['updated_at'].isoformat()
                 
-                customer = customers_collection.find_one({'_id': ObjectId(bill['customer_id'])})
-                if customer is not None:
-                    bill['customer'] = {
-                        'name': customer['name'],
-                        'phone': customer['phone']
+                # Cache customer data to avoid multiple lookups
+                customer_key = bill['customer_id']
+                if customer_key not in customer_cache:
+                    customer = customers_collection.find_one(
+                        {'_id': ObjectId(bill['customer_id'])},
+                        {'name': 1, 'phone': 1}
+                    )
+                    customer_cache[customer_key] = customer if customer else {
+                        'name': 'Unknown',
+                        'phone': 'N/A'
                     }
                 
+                bill['customer'] = customer_cache[customer_key]
                 formatted_bills.append(bill)
             except Exception as e:
-                print(f"Error formatting bill {bill.get('_id')}: {str(e)}")
+                print(f"Error formatting bill: {str(e)}")
                 continue
         
         return jsonify({
@@ -717,12 +796,9 @@ def get_bills(current_user):
         
     except Exception as e:
         print(f"Error in get_bills: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return jsonify({
             'message': 'Failed to get bills', 
-            'error': str(e),
-            'details': 'Check server logs for more information'
+            'error': str(e)
         }), 500
     
 @app.route('/api/bills', methods=['POST', 'OPTIONS'])
@@ -827,8 +903,6 @@ def create_bill(current_user):
         
     except Exception as e:
         print(f"Error creating bill: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return jsonify({
             'message': 'Failed to create bill',
             'error': str(e),
@@ -843,20 +917,30 @@ def get_upi_settings(current_user):
         return jsonify(), 200
         
     try:
+        cache_key = "upi_settings"
+        cached_settings = cache.get(cache_key)
+        
+        if cached_settings:
+            return jsonify(cached_settings), 200
+            
         settings = None
         if settings_collection is not None:
             settings = settings_collection.find_one({'type': 'upi_settings'})
             
         if settings is None:
-            return jsonify({
+            result = {
                 'upi_id': 'startailors@paytm',
                 'business_name': 'Star Tailors'
-            }), 200
+            }
+            cache[cache_key] = result
+            return jsonify(result), 200
         
-        return jsonify({
+        result = {
             'upi_id': settings.get('upi_id', 'startailors@paytm'),
             'business_name': settings.get('business_name', 'Star Tailors')
-        }), 200
+        }
+        cache[cache_key] = result
+        return jsonify(result), 200
         
     except Exception as e:
         return jsonify({'message': 'Failed to get UPI settings', 'error': str(e)}), 500
@@ -894,6 +978,9 @@ def update_upi_settings(current_user):
             upsert=True
         )
         
+        # Clear cache
+        cache.pop("upi_settings", None)
+        
         return jsonify({'message': 'UPI settings updated successfully'}), 200
         
     except Exception as e:
@@ -906,24 +993,35 @@ def get_business_settings(current_user):
     if request.method == 'OPTIONS':
         return jsonify(), 200
     try:
+        cache_key = "business_settings"
+        cached_settings = cache.get(cache_key)
+        
+        if cached_settings:
+            return jsonify(cached_settings), 200
+            
         settings = None
         if settings_collection is not None:
             settings = settings_collection.find_one({'type': 'business_info'})
             
         if settings is None:
             # Defaults
-            return jsonify({
+            result = {
                 'business_name': 'STAR TAILORS',
                 'address': 'Baramati, Maharashtra',
                 'phone': '+91 00000 00000',
                 'email': 'info@startailors.com'
-            }), 200
-        return jsonify({
+            }
+            cache[cache_key] = result
+            return jsonify(result), 200
+        
+        result = {
             'business_name': settings.get('business_name', 'STAR TAILORS'),
             'address': settings.get('address', ''),
             'phone': settings.get('phone', ''),
             'email': settings.get('email', '')
-        }), 200
+        }
+        cache[cache_key] = result
+        return jsonify(result), 200
     except Exception as e:
         return jsonify({'message': 'Failed to get business settings', 'error': str(e)}), 500
 
@@ -953,6 +1051,10 @@ def update_business_settings(current_user):
             {'$set': update_doc},
             upsert=True
         )
+        
+        # Clear cache
+        cache.pop("business_settings", None)
+        
         return jsonify({'message': 'Business settings updated successfully'}), 200
     except Exception as e:
         return jsonify({'message': 'Failed to update business settings', 'error': str(e)}), 500
@@ -980,7 +1082,7 @@ def get_tailors(current_user):
             
         search = request.args.get('search', '')
         page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
+        limit = min(int(request.args.get('limit', 10)), 50)
         skip = (page - 1) * limit
         
         query = {}
@@ -993,7 +1095,18 @@ def get_tailors(current_user):
                 ]
             }
         
-        tailors = list(tailors_collection.find(query).skip(skip).limit(limit).sort('created_at', -1))
+        # Use projection for better performance
+        projection = {
+            'name': 1,
+            'phone': 1,
+            'email': 1,
+            'specialization': 1,
+            'experience': 1,
+            'status': 1,
+            'created_at': 1
+        }
+        
+        tailors = list(tailors_collection.find(query, projection).skip(skip).limit(limit).sort('created_at', -1))
         total_tailors = tailors_collection.count_documents(query)
         
         for tailor in tailors:
@@ -1130,14 +1243,25 @@ def get_tailor_jobs(current_user, tailor_id):
         
         status = request.args.get('status', '')
         page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
+        limit = min(int(request.args.get('limit', 10)), 50)
         skip = (page - 1) * limit
         
         query = {'tailor_id': tailor['_id']}
         if status:
             query['status'] = status
         
-        jobs = list(jobs_collection.find(query).skip(skip).limit(limit).sort('created_at', -1))
+        # Use projection for better performance
+        projection = {
+            'title': 1,
+            'description': 1,
+            'status': 1,
+            'priority': 1,
+            'due_date': 1,
+            'created_at': 1,
+            'bill_id': 1
+        }
+        
+        jobs = list(jobs_collection.find(query, projection).skip(skip).limit(limit).sort('created_at', -1))
         total_jobs = jobs_collection.count_documents(query)
         
         for job in jobs:
@@ -1168,8 +1292,6 @@ def get_tailor_jobs(current_user, tailor_id):
         
     except Exception as e:
         print(f"Error in get_tailor_jobs: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'message': 'Failed to get tailor jobs', 'error': str(e)}), 500
 
 # Job Management Routes
@@ -1197,7 +1319,7 @@ def get_jobs(current_user):
         status = request.args.get('status', '')
         tailor_id = request.args.get('tailor_id', '')
         page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
+        limit = min(int(request.args.get('limit', 10)), 50)
         skip = (page - 1) * limit
         
         query = {}
@@ -1213,7 +1335,19 @@ def get_jobs(current_user):
         if tailor_id:
             query['tailor_id'] = ObjectId(tailor_id)
         
-        jobs = list(jobs_collection.find(query).skip(skip).limit(limit).sort('created_at', -1))
+        # Use projection for better performance
+        projection = {
+            'title': 1,
+            'description': 1,
+            'tailor_id': 1,
+            'status': 1,
+            'priority': 1,
+            'due_date': 1,
+            'created_at': 1,
+            'bill_id': 1
+        }
+        
+        jobs = list(jobs_collection.find(query, projection).skip(skip).limit(limit).sort('created_at', -1))
         total_jobs = jobs_collection.count_documents(query)
         
         for job in jobs:
@@ -1223,7 +1357,7 @@ def get_jobs(current_user):
             job['created_at'] = job['created_at'].isoformat()
             job['updated_at'] = job['updated_at'].isoformat()
             
-            tailor = tailors_collection.find_one({'_id': ObjectId(job['tailor_id'])})
+            tailor = tailors_collection.find_one({'_id': ObjectId(job['tailor_id'])}, {'name': 1, 'phone': 1})
             if tailor is not None:
                 job['tailor'] = {
                     'name': tailor['name'],
@@ -1353,7 +1487,7 @@ def update_job_status(current_user, job_id):
     except Exception as e:
         return jsonify({'message': 'Failed to update job status', 'error': str(e)}), 500
 
-# Dashboard Statistics Route
+# Dashboard Statistics Route - Optimized with caching
 @app.route('/api/dashboard/stats', methods=['GET', 'OPTIONS'])
 @token_required
 def get_dashboard_stats(current_user):
@@ -1361,10 +1495,16 @@ def get_dashboard_stats(current_user):
         return jsonify(), 200
         
     try:
+        cache_key = "dashboard_stats"
+        cached_stats = cache.get(cache_key)
+        
+        if cached_stats:
+            return jsonify(cached_stats), 200
+        
         # For development when DB is not available
         if (customers_collection is None or bills_collection is None or 
             tailors_collection is None or jobs_collection is None):
-            return jsonify({
+            stats = {
                 'total_customers': 0,
                 'total_bills': 0,
                 'total_tailors': 0,
@@ -1372,36 +1512,55 @@ def get_dashboard_stats(current_user):
                 'pending_jobs': 0,
                 'today_bills': 0,
                 'total_revenue': 0
-            }), 200
+            }
+            cache[cache_key] = stats
+            return jsonify(stats), 200
             
-        total_customers = customers_collection.count_documents({})
-        total_bills = bills_collection.count_documents({})
-        total_tailors = tailors_collection.count_documents({})
-        total_jobs = jobs_collection.count_documents({})
+        # Use parallel execution for better performance
+        def get_count(collection, query=None):
+            try:
+                return collection.count_documents(query if query else {})
+            except:
+                return 0
         
-        pending_jobs = jobs_collection.count_documents({'status': {'$in': ['assigned', 'in_progress']}})
+        with ThreadPoolExecutor() as executor:
+            # Submit all count operations in parallel
+            future_total_customers = executor.submit(get_count, customers_collection)
+            future_total_bills = executor.submit(get_count, bills_collection)
+            future_total_tailors = executor.submit(get_count, tailors_collection)
+            future_total_jobs = executor.submit(get_count, jobs_collection)
+            future_pending_jobs = executor.submit(get_count, jobs_collection, {'status': {'$in': ['assigned', 'in_progress']}})
+            
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow = today + timedelta(days=1)
+            future_today_bills = executor.submit(get_count, bills_collection, {
+                'created_at': {'$gte': today, '$lt': tomorrow}
+            })
+            
+            # Get revenue in separate thread
+            def get_revenue():
+                try:
+                    pipeline = [{'$group': {'_id': None, 'total_revenue': {'$sum': '$total'}}}]
+                    revenue_result = list(bills_collection.aggregate(pipeline))
+                    return revenue_result[0]['total_revenue'] if revenue_result else 0
+                except:
+                    return 0
+            
+            future_total_revenue = executor.submit(get_revenue)
+            
+            # Wait for all results
+            stats = {
+                'total_customers': future_total_customers.result(),
+                'total_bills': future_total_bills.result(),
+                'total_tailors': future_total_tailors.result(),
+                'total_jobs': future_total_jobs.result(),
+                'pending_jobs': future_pending_jobs.result(),
+                'today_bills': future_today_bills.result(),
+                'total_revenue': future_total_revenue.result()
+            }
         
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        tomorrow = today + timedelta(days=1)
-        today_bills = bills_collection.count_documents({
-            'created_at': {'$gte': today, '$lt': tomorrow}
-        })
-        
-        pipeline = [
-            {'$group': {'_id': None, 'total_revenue': {'$sum': '$total'}}}
-        ]
-        revenue_result = list(bills_collection.aggregate(pipeline))
-        total_revenue = revenue_result[0]['total_revenue'] if revenue_result else 0
-        
-        return jsonify({
-            'total_customers': total_customers,
-            'total_bills': total_bills,
-            'total_tailors': total_tailors,
-            'total_jobs': total_jobs,
-            'pending_jobs': pending_jobs,
-            'today_bills': today_bills,
-            'total_revenue': total_revenue
-        }), 200
+        cache[cache_key] = stats
+        return jsonify(stats), 200
         
     except Exception as e:
         return jsonify({'message': 'Failed to get dashboard stats', 'error': str(e)}), 500
@@ -1419,310 +1578,29 @@ def health_check():
         'database': db_status
     }), 200
 
-# Reports and Analytics Routes
-@app.route('/api/reports/revenue', methods=['GET', 'OPTIONS'])
-@token_required
-def get_revenue_report(current_user):
-    if request.method == 'OPTIONS':
-        return jsonify(), 200
-        
-    try:
-        # For development when DB is not available
-        if bills_collection is None:
-            return jsonify({'revenue_data': []}), 200
-            
-        from_date = request.args.get('from_date')
-        to_date = request.args.get('to_date')
-        
-        if not from_date or not to_date:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=180)
-        else:
-            start_date = datetime.fromisoformat(from_date)
-            end_date = datetime.fromisoformat(to_date)
-        
-        pipeline = [
-            {
-                '$match': {
-                    'created_at': {'$gte': start_date, '$lte': end_date}
-                }
-            },
-            {
-                '$group': {
-                    '_id': {
-                        'year': {'$year': '$created_at'},
-                        'month': {'$month': '$created_at'}
-                    },
-                    'revenue': {'$sum': '$total'},
-                    'orders': {'$sum': 1},
-                    'avg_order_value': {'$avg': '$total'}
-                }
-            },
-            {
-                '$sort': {'_id.year': -1, '_id.month': -1}
-            }
-        ]
-        
-        revenue_data = list(bills_collection.aggregate(pipeline))
-        
-        formatted_data = []
-        for item in revenue_data:
-            month_names = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            period = f"{month_names[item['_id']['month']]} {item['_id']['year']}"
-            formatted_data.append({
-                'period': period,
-                'revenue': round(item['revenue'], 2),
-                'orders': item['orders'],
-                'avgOrderValue': round(item['avg_order_value'], 2)
-            })
-        
-        return jsonify({'revenue_data': formatted_data}), 200
-        
-    except Exception as e:
-        return jsonify({'message': 'Failed to get revenue report', 'error': str(e)}), 500
+# Add performance monitoring middleware
+@app.after_request
+def after_request(response):
+    # Add performance headers
+    if hasattr(request, 'start_time'):
+        response.headers['X-Response-Time'] = f"{time.time() - request.start_time:.3f}s"
+    return response
 
-@app.route('/api/reports/customers', methods=['GET', 'OPTIONS'])
-@token_required
-def get_customer_report(current_user):
-    if request.method == 'OPTIONS':
-        return jsonify(), 200
-        
-    try:
-        # For development when DB is not available
-        if customers_collection is None:
-            return jsonify({'customer_reports': []}), 200
-            
-        pipeline = [
-            {
-                '$lookup': {
-                    'from': 'bills',
-                    'localField': '_id',
-                    'foreignField': 'customer_id',
-                    'as': 'bills'
-                }
-            },
-            {
-                '$addFields': {
-                    'total_orders': {'$size': '$bills'},
-                    'total_spent': {'$sum': '$bills.total'},
-                    'outstanding_balance': {
-                        '$sum': {
-                            '$map': {
-                                'input': {
-                                    '$filter': {
-                                        'input': '$bills',
-                                        'cond': {'$eq': ['$$this.status', 'pending']}
-                                    }
-                                },
-                                'in': '$$this.balance'
-                            }
-                        }
-                    },
-                    'last_order_date': {'$max': '$bills.created_at'}
-                }
-            },
-            {
-                '$project': {
-                    'name': 1,
-                    'phone': 1,
-                    'email': 1,
-                    'total_orders': 1,
-                    'total_spent': 1,
-                    'outstanding_balance': 1,
-                    'last_order_date': 1,
-                    'status': {'$cond': [{'$gt': ['$total_orders', 0]}, 'active', 'inactive']}
-                }
-            },
-            {
-                '$sort': {'total_spent': -1}
-            }
-        ]
-        
-        customer_reports = list(customers_collection.aggregate(pipeline))
-        
-        for customer in customer_reports:
-            customer['_id'] = str(customer['_id'])
-            if customer.get('last_order_date'):
-                customer['last_order_date'] = customer['last_order_date'].isoformat()
-            customer['outstanding_balance'] = customer.get('outstanding_balance', 0)
-        
-        return jsonify({'customer_reports': customer_reports}), 200
-        
-    except Exception as e:
-        return jsonify({'message': 'Failed to get customer report', 'error': str(e)}), 500
+@app.before_request
+def before_request():
+    request.start_time = time.time()
 
-@app.route('/api/reports/tailors', methods=['GET', 'OPTIONS'])
-@token_required
-def get_tailor_report(current_user):
-    if request.method == 'OPTIONS':
-        return jsonify(), 200
-        
-    try:
-        # For development when DB is not available
-        if tailors_collection is None:
-            return jsonify({'tailor_reports': []}), 200
-            
-        pipeline = [
-            {
-                '$lookup': {
-                    'from': 'jobs',
-                    'localField': '_id',
-                    'foreignField': 'tailor_id',
-                    'as': 'jobs'
-                }
-            },
-            {
-                '$addFields': {
-                    'completed_jobs': {
-                        '$size': {
-                            '$filter': {
-                                'input': '$jobs',
-                                'cond': {'$eq': ['$$this.status', 'completed']}
-                            }
-                        }
-                    },
-                    'total_jobs': {'$size': '$jobs'},
-                    'avg_completion_time': 3.5,
-                    'rating': 4.7,
-                    'efficiency': {
-                        '$multiply': [
-                            {
-                                '$divide': [
-                                    {
-                                        '$size': {
-                                            '$filter': {
-                                                'input': '$jobs',
-                                                'cond': {'$eq': ['$$this.status', 'completed']}
-                                            }
-                                        }
-                                    },
-                                    {'$max': [{'$size': '$jobs'}, 1]}
-                                ]
-                            },
-                            100
-                        ]
-                    }
-                }
-            },
-            {
-                '$project': {
-                    'name': 1,
-                    'phone': 1,
-                    'specialization': 1,
-                    'completed_jobs': 1,
-                    'avg_completion_time': 1,
-                    'rating': 1,
-                    'efficiency': 1,
-                    'revenue': {'$multiply': ['$completed_jobs', 800]}
-                }
-            },
-            {
-                '$sort': {'completed_jobs': -1}
-            }
-        ]
-        
-        tailor_reports = list(tailors_collection.aggregate(pipeline))
-        
-        for tailor in tailor_reports:
-            tailor['_id'] = str(tailor['_id'])
-            tailor['efficiency'] = round(tailor.get('efficiency', 0), 0)
-        
-        return jsonify({'tailor_reports': tailor_reports}), 200
-        
-    except Exception as e:
-        return jsonify({'message': 'Failed to get tailor report', 'error': str(e)}), 500
+# Initialize default user in background
+def init_default_user_async():
+    time.sleep(2)  # Wait for app to start
+    init_default_user()
 
-@app.route('/api/reports/outstanding', methods=['GET', 'OPTIONS'])
-@token_required
-def get_outstanding_report(current_user):
-    if request.method == 'OPTIONS':
-        return jsonify(), 200
-        
-    try:
-        # For development when DB is not available
-        if bills_collection is None:
-            return jsonify({'outstanding_reports': []}), 200
-            
-        pipeline = [
-            {
-                '$match': {
-                    'status': 'pending',
-                    'balance': {'$gt': 0}
-                }
-            },
-            {
-                '$lookup': {
-                    'from': 'customers',
-                    'localField': 'customer_id',
-                    'foreignField': '_id',
-                    'as': 'customer'
-                }
-            },
-            {
-                '$unwind': '$customer'
-            },
-            {
-                '$group': {
-                    '_id': '$customer_id',
-                    'customer_name': {'$first': '$customer.name'},
-                    'customer_phone': {'$first': '$customer.phone'},
-                    'total_outstanding': {'$sum': '$balance'},
-                    'oldest_due': {'$min': '$created_at'},
-                    'orders': {
-                        '$push': {
-                            'bill_id': {'$toString': '$_id'},
-                            'amount': '$balance',
-                            'due_date': '$created_at'
-                        }
-                    }
-                }
-            },
-            {
-                '$sort': {'total_outstanding': -1}
-            }
-        ]
-        
-        outstanding_reports = list(bills_collection.aggregate(pipeline))
-        
-        for report in outstanding_reports:
-            report['customer_id'] = str(report['_id'])
-            del report['_id']
-            report['oldest_due'] = report['oldest_due'].isoformat()
-            
-            for order in report['orders']:
-                order['due_date'] = order['due_date'].isoformat()
-                days_diff = (datetime.now() - datetime.fromisoformat(order['due_date'].split('T')[0])).days
-                order['days_overdue'] = max(0, days_diff)
-        
-        return jsonify({'outstanding_reports': outstanding_reports}), 200
-        
-    except Exception as e:
-        return jsonify({'message': 'Failed to get outstanding report', 'error': str(e)}), 500
-
-@app.route('/api/reports/export', methods=['POST', 'OPTIONS'])
-@token_required
-def export_report(current_user):
-    if request.method == 'OPTIONS':
-        return jsonify(), 200
-        
-    try:
-        data = request.get_json()
-        report_type = data.get('report_type')
-        format_type = data.get('format', 'csv')
-        
-        if not report_type:
-            return jsonify({'message': 'Report type is required'}), 400
-        
-        return jsonify({
-            'message': f'{report_type.title()} report export started',
-            'download_url': f'/api/downloads/{report_type}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format_type}'
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'message': 'Failed to export report', 'error': str(e)}), 500
+# Start initialization in background
+init_thread = threading.Thread(target=init_default_user_async)
+init_thread.daemon = True
+init_thread.start()
 
 if __name__ == '__main__':
-    init_default_user()
     port = int(os.getenv('PORT', '5000'))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    # Use production server for better performance
+    app.run(debug=False, host='0.0.0.0', port=port, threaded=True)
